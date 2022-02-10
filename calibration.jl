@@ -49,3 +49,18 @@ f_calibration
 if savefig
     save("figures/calibration__$(basename(filename)).pdf", f_calibration, pt_per_unit = 1)
 end
+
+
+#%%
+
+using Arrow
+Arrow.write("df_fits.arrow", df_fits)
+
+df2 = DataFrame(Arrow.Table("df_fits.arrow"))
+
+
+using Parquet
+
+write_parquet("df_fits.parquet", df_fits)
+
+df3 = identity.(DataFrame(read_parquet("df_fits.parquet")))
