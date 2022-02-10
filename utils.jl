@@ -1,10 +1,15 @@
 using StatsBase
-using LinearAlgebra: diag
+using LinearAlgebra: diag, LAPACK
 using Parameters
 using UnPack
 using ColorSchemes
 using FFTW
 
+#%%
+
+const c_light = 299792458 # u"m/s"
+const ν_rep = 14e9 # Hz
+const ν_offset = 6.19e9 # Hz
 
 
 function get_data(filename)
@@ -27,63 +32,6 @@ end
 
 #%%
 
-function plot_order(x, spectrum, λ_approx; remove_nans = false)
-
-    f = Figure(resolution = (1200, 400))
-
-    if remove_nans
-        idx_left, idx_right = get_not_nan_idx(spectrum)
-    else
-        idx_left, idx_right = 1, length(spectrum)
-    end
-
-
-    ax1 = Axis(
-        f[1, 1],
-        xlabel = "Pixel Index",
-        ylabel = "Spectrum Intensity",
-        limits = (x[idx_left], x[idx_right], 0, nothing),
-    )
-    ax2 = Axis(
-        f[1, 1],
-        xlabel = "Approximative λ",
-        limits = (λ_approx[idx_left], λ_approx[idx_right], 0, nothing),
-        xticklabelcolor = :grey,
-        xlabelcolor = :grey,
-        xaxisposition = :top,
-    )
-
-    lines!(ax1, x, spectrum)
-    lines!(ax2, λ_approx, spectrum, linewidth = 0)
-    # errorbars!(ax1, x, spectrum, uncertainty)
-    hidexdecorations!(ax2, label = false, ticklabels = false, ticks = false)
-
-    return f
-end
-
-#%%
-
-
-function plot_overlap(df)
-
-    orders = 1:nrow(df)
-
-    f = Figure(resolution = (1200, 400))
-    ax = Axis(f[1, 1], xlabel = "Log Approximative λ", ylabel = "Order")
-    for order in orders
-        lines!(
-            ax,
-            log.(df[order, :wavelength]),
-            fill(order, length(df[order, :wavelength])),
-        )
-    end
-    return f
-end
-
-
-
-#%%
-
 
 function make_image(df)
 
@@ -98,25 +46,6 @@ end
 
 #%%
 
-function plot_image(image)
-
-    f = Figure(resolution = (1000, 300))
-    ax = Axis(
-        f[1, 1],
-        xlabel = "Pixel ID",
-        ylabel = "Order",
-        # autolimitaspect = 25,
-        limits = (0, size(image, 2), 0, size(image, 1)),
-    )
-    # ax.yreversed = true
-    heatmap!(ax, image')
-    return f
-
-end
-
-
-#%%
-
 
 function StatsBase.cov2cor(X::Matrix)
     return cov2cor(X, sqrt.(diag(X)))
@@ -127,7 +56,7 @@ end
 #%%
 
 
-function get_sections(spectrum; w = 3)
+function get_sections(spectrum; w = 7)
     peak_ids = findmaxima(spectrum, w)[1]
     half_width = floor.(Int, diff(peak_ids) / 2)
     center_edges = peak_ids[1:end-1] .+ half_width
@@ -144,28 +73,14 @@ function get_sections(spectrum; w = 3)
 end
 
 
-# let x = x[mask], spectrum = spectrum[mask], λ_approx = λ_approx[mask]
-#     pks, vals = findmaxima(spectrum, 2)
-#     f = Figure(resolution = (1200, 400))
-#     ax1 = Axis(
-#         f[1, 1],
-#         xlabel = "Pixel Index",
-#         ylabel = "Spectrum Intensity",
-#         limits = (nothing, nothing, 0, nothing),
-#     )
-#     lines!(ax1, x, spectrum)
-#     scatter!(ax1, x[pks], spectrum[pks], color = :red)
-#     f
-# end
-
-
 #%%
 
 
-@with_kw struct Data{T,S,R}
+@with_kw struct Data{T,S,R,U}
     x::T
     y::S
     σ::R
+    λ_approx::U
 end
 
 
@@ -178,20 +93,105 @@ end
 end
 
 
-function fit!(fitobject::FitObject)
-    @unpack x, y, σ = fitobject.data
+function fit!(fit::FitObject)
+    @unpack x, y, σ, λ_approx = fit.data
     w = 1 ./ σ .^ 2
-    fitresult = curve_fit(fitobject.func, x, y, w, fitobject.p0, autodiff = :forwarddiff)
-    fitobject.fitresult = fitresult
+    # lb = [0, minimum(x), 0.01, 1.0, 0.0, -10]
+    # ub = [10, maximum(x), 10.00, 10.00, 10.0, 10]
+    # fitresult = curve_fit(fit.func, x, y, w, fit.p0, autodiff = :forwarddiff, lower=lb, upper=ub)
+    fitresult = curve_fit(fit.func, x, y, w, fit.p0, autodiff = :forwarddiff)
+    fit.fitresult = fitresult
 end
 
 
-function residuals(fitobject::FitObject)
-    return fitobject.fitresult.resid
+function residuals(fit::FitObject)
+    return fit.fitresult.resid
 end
 
-function coefficients(fitobject::FitObject)
-    return coef(fitobject.fitresult)
+function coefficients(fit::FitObject)
+    return coef(fit.fitresult)
+end
+
+
+function degrees_of_freedom(fit::FitObject)
+    return dof(fit.fitresult)
+end
+
+function get_standard_deviations(fit::FitObject)
+    return stderror(fit.fitresult)
+end
+
+function get_λ_true(fit::FitObject)
+    λ_approx_μ = get_λ_approx_μ_SI(fit.data.x, fit.data.λ_approx, fit)
+    return get_λ_true_from_λ_approx(λ_approx_μ)
+end
+
+
+
+function is_singular(J::Matrix{Float64})
+    return LAPACK.getrf!(J' * J)[3] != 0
+end
+
+
+function is_singular(fit::FitObject)
+    J = fit.fitresult.jacobian
+    return is_singular(J)
+end
+
+
+function is_converged(fit::FitObject)
+    if !fit.fitresult.converged
+        return false
+    end
+
+    if is_singular(fit)
+        return false
+    end
+
+    covar = covariance(fit)
+    vars = diag(covar)
+    vratio = minimum(vars) / maximum(vars)
+
+    is_0 = isapprox(vratio, 0.0, atol = 0, rtol = Base.rtoldefault(vratio, 0.0, 0))
+    is_negative = vratio < 0.0
+    if is_0 || is_negative
+        return false
+    end
+
+    return true
+end
+
+
+function is_valid(fit::FitObject)
+
+    coefs = coefficients(fit)
+    A, μ, σ, P, c, b = coefs
+
+    if !(0.1 < A < 5)
+        return false
+    end
+
+    if !(minimum(x) < μ < maximum(x))
+        return false
+    end
+
+    if !(1.1 < σ < 3)
+        return false
+    end
+
+    if !(0.75 < P < 2)
+        return false
+    end
+
+    if !(0 < c < 5)
+        return false
+    end
+
+    if !(-1 < b < 1)
+        return false
+    end
+
+    return true
 end
 
 
@@ -223,80 +223,6 @@ end
 
 #%%
 
-
-function get_colors()
-    names = ["red", "blue", "green", "purple", "orange", "yellow", "brown", "pink", "grey"]
-    colors = ColorSchemes.Set1_9
-    d_colors = Dict(names .=> colors)
-    return colors
-end
-
-
-#%%
-
-
-function plot(fits::Vector{FitObject})
-
-    data = fits[1].data
-    xx = range(minimum(data.x), maximum(data.x), 1000)
-    colors = get_colors()
-
-    f = Figure(resolution = (1200, 400))
-    ax1 = Axis(
-        f[1, 1],
-        xlabel = "Pixel Index",
-        ylabel = "Spectrum Intensity",
-        limits = (nothing, nothing, 0, nothing),
-    )
-
-    scatter!(ax1, data.x, data.y, label = "Data", color = :black, markersize = 6)
-    errorbars!(ax1, data.x, data.y, data.σ, whiskerwidth = 2, color = :black) # same low and high error
-
-    for (fit, color) in zip(fits, colors)
-        lines!(ax1, xx, fit.func(xx, coefficients(fit)), label = fit.name, color = color)
-    end
-
-    axislegend(ax1, position = :lt)
-    return f
-end
-
-function plot(fit::FitObject)
-    return plot([fit])
-end
-
-
-#%%
-
-
-function plot_residuals(fits::Vector{FitObject})
-
-    data = fits[1].data
-    x = fits[1].data.x
-    colors = get_colors()
-
-    f = Figure(resolution = (1200, 400))
-    ax = Axis(
-        f[1, 1],
-        xlabel = "Pixel Index",
-        ylabel = "Residuals",
-        # limits = (nothing, nothing, 0, nothing),
-    )
-
-    for (fit, color) in zip(fits, colors)
-        scatter!(ax, x, residuals(fit), label = fit.name, color = color, markersize = 5)
-        errorbars!(ax, x, residuals(fit), ones(length(x)), whiskerwidth = 10, color = color)
-    end
-
-    axislegend(ax, position = :lt)
-    return f
-end
-
-function plot_residuals(fit::FitObject)
-    return plot_residuals([fit])
-end
-
-#%%
-
 function compute_χ²(fit::FitObject)
     return sum(residuals(fit) .^ 2)
 end
@@ -309,13 +235,67 @@ end
 
 #%%
 
-function make_fits(x, spectrum, uncertainty, sections)
 
-    fits = FitObject[]
-    chi2s = Float32[]
+function get_λ_approx_μ(x, λ_approx, fit)
+    μ_fit = coefficients(fit)[2]
+    idx = argmin(abs.(x .- μ_fit))
+    λ_tmp = λ_approx[idx]
+    return λ_tmp
+end
+
+
+function get_λ_approx_μ_SI(x, λ_approx, fit)
+    return get_λ_approx_μ(x, λ_approx, fit) * 1e-10
+end
+
+
+function find_n(λ)
+    n = (c_light / λ - ν_offset) / ν_rep
+    n_int = round(Int, n)
+    # TODO Insert check
+    return n_int
+end
+
+function λ2ν(λ)
+    c_light / λ
+end
+
+function ν2λ(ν)
+    return c_light / ν
+end
+
+function νₙ(n)
+    ν = ν_rep * n + ν_offset
+    return ν
+end
+
+function n2λ(n)
+    ν = νₙ(n)
+    λ = ν2λ(ν)
+    return λ
+end
+
+
+function get_λ_true_from_λ_approx(λ_approx)
+    n = find_n(λ_approx)
+    λ_true = n2λ(n)
+    return λ_true
+end
+
+
+
+function make_fits(x, spectrum, uncertainty, λ_approx, sections)
+
+    chi2s = Float64[]
     coefs = Vector[]
+    λ_true = Float64[]
+    converged = Bool[]
+    valid = Bool[]
+    standard_deviations = Vector[]
 
     for (low, high) in zip(sections[1:end-1], sections[2:end])
+
+        # @show low, high
 
         mask_section = low:high
 
@@ -323,6 +303,7 @@ function make_fits(x, spectrum, uncertainty, sections)
             x = x[mask_section],
             y = spectrum[mask_section],
             σ = uncertainty[mask_section],
+            λ_approx = λ_approx[mask_section],
         )
 
         fit_supergauss_ext = FitObject(
@@ -334,62 +315,269 @@ function make_fits(x, spectrum, uncertainty, sections)
 
         fit!(fit_supergauss_ext)
 
-        push!(fits, fit_supergauss_ext)
         push!(chi2s, compute_χ²(fit_supergauss_ext))
         push!(coefs, coefficients(fit_supergauss_ext))
+        push!(λ_true, get_λ_true(fit_supergauss_ext))
+        push!(converged, is_converged(fit_supergauss_ext))
+        push!(valid, is_valid(fit_supergauss_ext))
 
-    end
-
-    return fits, chi2s, coefs
-end
-
-
-
-#%%
-
-function plot_fit_coefficients(df_fit; include_points = false)
-
-    f = Figure(resolution = (800, 1200))
-    axes = [
-        Axis(f[i, 1], limits = (0, nrow(df_fit), nothing, nothing)) for
-        i = 1:length(names(df_fit))
-    ]
-
-    for (ax, name) in zip(axes, names(df_fit))
-        ax.ylabel = name
-
-        if include_points
-            scatterlines!(ax, df_fit[!, name])
+        if converged[end] && valid[end]
+            push!(standard_deviations, get_standard_deviations(fit_supergauss_ext))
         else
-            lines!(ax, df_fit[!, name])
-        end
-
-        if name != last(names(df_fit))
-            hidexdecorations!(ax, grid = false)
+            push!(standard_deviations, fill(NaN, length(fit_supergauss_ext.p0)))
         end
     end
 
-    axes[end].xlabel = "Fit Index"
-    return f
+    df_fit = DataFrame(permutedims(hcat(coefs...)), [:A, :μ, :σ, :P, :c, :b])
+    df_fit[!, "χ²"] = chi2s
+    df_fit[!, "λ_true"] = λ_true
+    df_fit[!, "converged"] = converged
+    df_fit[!, "valid"] = valid
 
+    df_errors = DataFrame(
+        permutedims(hcat(standard_deviations...)),
+        [:std_A, :std_μ, :std_σ, :std_P, :std_c, :std_b],
+    )
+
+    return hcat(df_fit, df_errors)
 end
+
 
 
 #%%
 
-function plot_fourier(signal, name, ymax = nothing)
-
-    Δt = 1
-
-    # Fourier Transform of it
-    F = fft(signal) |> fftshift
-    freqs = fftfreq(length(signal), 1.0 / Δt) |> fftshift
-
-    # plots
-    f = Figure(resolution = (1200, 400))
-    ax1 = Axis(f[1, 1], title = name)
-    lines!(ax1, signal)
-    ax2 = Axis(f[1, 2], title = "Spectrum of $name", limits = (-0.5, 0.5, 0, ymax))
-    lines!(ax2, freqs, abs.(F))
-    return f
+function get_df_coefficients(fit::FitObject, d_p0)
+    df_coefficients = DataFrame(keys(d_p0) .=> coefficients(fit))
+    push!(df_coefficients, get_standard_deviations(fit))
+    push!(df_coefficients, abs.(coefficients(fit) ./ get_standard_deviations(fit)))
+    return df_coefficients
 end
+
+
+
+#%%
+
+
+# let y=spectrum
+#     # pks, vals = findmaxima(y)
+#     pks, vals = findmaxima(y, 5)
+#     pks, proms = peakproms(pks, y)
+#     pks, widths, leftedge, rightedge = peakwidths(pks, y, proms)
+#     return widths
+# end
+
+
+#%%
+
+function Gauss(x, A, μ, σ, c)
+    z = (x - μ)^2 / (2 * σ^2)
+    return A * exp(-z) + c
+end
+@. Gauss_vec(x, p) = Gauss(x, p...)
+
+
+function SuperGaussSimple(x, A, μ, σ, P)
+    z = (x - μ)^2 / (2 * σ^2)
+    return A * exp(-z^P)
+end
+
+function SuperGauss(x, A, μ, σ, P, c, b = 0)
+    z = (x - μ)^2 / (2 * σ^2)
+    return A * exp(-z^P) + c + b * (x - μ)
+end
+@. SuperGauss_vec(x, p) = SuperGauss(x, p...)
+
+#%%
+
+if false
+
+
+    section_id = 430
+    # section_id = 9
+    mask_section = sections[section_id]:sections[section_id+1]
+    plot_order(x[mask_section], spectrum[mask_section], λ_approx[mask_section])
+
+    data = Data(
+        x = x[mask_section],
+        y = spectrum[mask_section],
+        σ = uncertainty[mask_section],
+        λ_approx = λ_approx[mask_section],
+    )
+
+
+    fit_gauss = FitObject(
+        name = "Gauss",
+        data = data,
+        func = Gauss_vec,
+        p0 = [1.0, mean(data.x), 1.0, 0.0],
+    )
+    fit!(fit_gauss)
+    print_χ²(fit_gauss)
+    coefficients(fit_gauss)
+    covariance(fit_gauss)
+    correlation(fit_gauss)
+
+
+    fit_supergauss = FitObject(
+        name = "SuperGauss",
+        data = data,
+        func = SuperGauss_vec,
+        p0 = [1.0, mean(data.x), 1.0, 1.0, 0],
+    )
+    fit!(fit_supergauss)
+    print_χ²(fit_supergauss)
+    compute_χ²(fit_supergauss)
+    coefficients(fit_supergauss)
+
+
+    fit_supergauss_ext = FitObject(
+        name = "SuperGauss Ext",
+        data = data,
+        func = SuperGauss_vec,
+        p0 = [1.0, mean(data.x), 1.0, 1.0, 0, 0],
+    )
+    fit!(fit_supergauss_ext)
+    print_χ²(fit_supergauss_ext)
+    compute_χ²(fit_supergauss_ext)
+    coefficients(fit_supergauss_ext)
+    get_λ_true(fit_supergauss_ext) * 1e10
+
+    #%%
+
+    f_fits = plot([fit_gauss, fit_supergauss, fit_supergauss_ext])
+    f_residuals = plot_residuals([fit_gauss, fit_supergauss, fit_supergauss_ext])
+
+end
+
+#%%
+
+# plot_fourier(spectrum, "Spectrum", 100)
+
+# #%%
+
+# f_Δμ = Figure(resolution = (1200, 400));
+# ax_Δμ = Axis(f_Δμ[1, 1], title = "Δμ", xlabel = "Fit Index", ylabel = "Δμ")
+# lines!(ax_Δμ, diff(df_fit[!, :μ]))
+# f_Δμ
+
+# #%%
+
+# display(plot_fourier(df_fit[!, "A"], "A", 5))
+# display(plot_fourier(df_fit[!, "c"], "c", 5))
+
+# for name in names(df_fit)
+#     signal = df_fit[!, name]
+#     display(plot_fourier(signal, name, 5))
+# end
+
+# #%%
+
+# sections = get_sections(spectrum);
+# section_id = 252
+# orders = 40
+# mask_section = sections[section_id]:sections[section_id+orders];
+# # plot_order(x[mask_section], spectrum[mask_section], λ_approx[mask_section])
+
+# data = Data(x = x[mask_section], y = spectrum[mask_section], σ = uncertainty[mask_section]);
+
+
+# function MultiOrderSuperGauss(
+#     x,
+#     #
+#     A0,
+#     # ΔA,
+#     # Af,
+#     # Aϕ,
+#     #
+#     μ0,
+#     Δμ,
+#     δμ,
+#     #
+#     σ0,
+#     # Δσ,
+#     #
+#     P0,
+#     # ΔP,
+#     #
+#     c0,
+#     # Δc,
+#     # cf,
+#     # cϕ,
+#     #
+#     orders,
+# )
+
+#     x̄ = (x - μ0)
+
+
+#     # c = c0
+#     c = c0 #+ Δc * sin(2π * cf * x̄ + cϕ)
+
+#     res = 0
+#     for i = 1:orders
+#         j = i - 1
+
+#         # A = A0 + ΔA * sin(2π * Af * j + Aϕ)
+#         A = A0
+#         # μ = μ0 + Δμ * j
+#         μ = μ0 + Δμ * j + δμ * j^2
+#         # σ = σ0 + Δσ * j
+#         σ = σ0
+#         # P = P0 + ΔP * j
+#         P = P0
+
+#         res += SuperGaussSimple(x, A, μ, σ, P)
+#         # c += Δc * sin(2π * cf * j + cϕ)
+#         # c += Δc * sin(2π * cf * x̄ + cϕ)
+#     end
+
+#     res += c
+#     return res
+# end
+# @. MultiOrderSuperGauss_vec(x, p) = MultiOrderSuperGauss(x, p..., orders)
+
+
+
+# d_p0 = OrderedDict(
+#     :A0 => 0.55,
+#     # :ΔA => 0.0,
+#     # :Af => 0.1,
+#     # :Aϕ => 0.0,
+
+#     :μ0 => 3073.0,
+#     :Δμ => 13,
+#     :δμ => 0.0005,
+#     #
+#     :σ0 => 1.7,
+#     # :Δσ => 0.0005,
+#     #
+#     :P0 => 1.3,
+#     # :ΔP => 0.0005,
+#     #
+#     :c0 => 0.12,
+#     # :Δc => 0.01,
+#     # :cf => 0.001,
+#     # :cϕ => 0.0,
+# );
+
+
+# fit_gauss = FitObject(
+#     name = "Multi Order Super Gauss",
+#     data = data,
+#     func = MultiOrderSuperGauss_vec,
+#     p0 = collect(values(d_p0)),
+# );
+# fit!(fit_gauss);
+# print_χ²(fit_gauss)
+# plot(fit_gauss)
+# df_coefficients = get_df_coefficients(fit_gauss, d_p0);
+
+# df_coefficients[1, :]
+# # select(df_coefficients, Between(:A0, :Aϕ))[1, :]
+# # select(df_coefficients, Between(:c0,:cϕ))[1, :]
+# # select(df_coefficients, Between(:c0,:cϕ))[1, :]
+
+# # degrees_of_freedom(fit_gauss)
+
+
+# #%%

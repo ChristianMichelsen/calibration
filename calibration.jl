@@ -3,8 +3,11 @@ using DataFrames
 using CairoMakie
 using LsqFit
 using Peaks
+using OrderedCollections
+
 
 include("utils.jl")
+include("plots.jl")
 
 savefig = false
 make_images = false
@@ -39,158 +42,81 @@ end
 filename = "../expres_tp/LFC_200907.1063.fits"
 df = get_data(filename)
 
-order = 45
-spectrum_all = df[order, :spectrum];
-uncertainty_all = df[order, :uncertainty];
-λ_approx_all = df[order, :wavelength];
-x_all = range(1, length(spectrum_all));
-plot_order(x_all, spectrum_all, λ_approx_all)
+order = 10
 
-nan_left, nan_right = get_not_nan_idx(spectrum_all)
-mask = nan_left:nan_right
+function get_df_fits(df, orders, spectrum_min = 0.2)
 
-spectrum = spectrum_all[mask];
-uncertainty = uncertainty_all[mask];
-λ_approx = λ_approx_all[mask];
-x = x_all[mask];
+    df_fits = DataFrame[]
 
-plot_order(x, spectrum, λ_approx)
+    for order = orders[1]:orders[end]
 
+        spectrum_all = df[order, :spectrum]
+        uncertainty_all = df[order, :uncertainty]
+        λ_approx_all = df[order, :wavelength]
+        x_all = range(1, length(spectrum_all))
+        # plot_order(x_all, spectrum_all, λ_approx_all)
 
-# let y=spectrum
-#     # pks, vals = findmaxima(y)
-#     pks, vals = findmaxima(y, 5)
-#     pks, proms = peakproms(pks, y)
-#     pks, widths, leftedge, rightedge = peakwidths(pks, y, proms)
-#     return widths
-# end
+        nan_left, nan_right = get_not_nan_idx(spectrum_all)
+        mask = nan_left:nan_right
 
-#%%
+        spectrum = spectrum_all[mask]
+        uncertainty = uncertainty_all[mask]
+        λ_approx = λ_approx_all[mask]
+        x = x_all[mask]
+        # plot_order(x, spectrum, λ_approx)
 
-function Gauss(x, A, μ, σ, c)
-    z = (x - μ)^2 / (2 * σ^2)
-    return A * exp(-z) + c
+        if !any(spectrum_min .< spectrum)
+            continue
+        end
+
+        #%%
+
+        # println(order)
+        sections = get_sections(spectrum, w = 7)
+        df_fit = make_fits(x, spectrum, uncertainty, λ_approx, sections)
+        # N_not_converged = sum(.!df_fit.converged)
+        # N_not_valid = sum(.!df_fit.valid)
+        # N_not_converged + N_not_valid
+        # sum(df_fit.converged .&& df_fit.valid)
+        # println(df_fit)
+
+        df_fit[!, :order] .= order
+
+        push!(df_fits, df_fit)
+    end
+
+    return vcat(df_fits...)
 end
-@. Gauss_vec(x, p) = Gauss(x, p...)
-
-function SuperGauss(x, A, μ, σ, P, c, b = 0)
-    z = (x - μ)^2 / (2 * σ^2)
-    return A * exp(-z^P) + c + b * (x - μ)
-end
-@. SuperGauss_vec(x, p) = SuperGauss(x, p...)
 
 
-sections = get_sections(spectrum);
-section_id = 252
-mask_section = sections[section_id]:sections[section_id+1];
-plot_order(x[mask_section], spectrum[mask_section], λ_approx[mask_section])
-
-data = Data(x = x[mask_section], y = spectrum[mask_section], σ = uncertainty[mask_section]);
-
-
-fit_gauss = FitObject(
-    name = "Gauss",
-    data = data,
-    func = Gauss_vec,
-    p0 = [1.0, mean(data.x), 1.0, 0.0],
-)
-fit!(fit_gauss);
-print_χ²(fit_gauss)
-coefficients(fit_gauss)
-covariance(fit_gauss)
-correlation(fit_gauss)
-
-
-fit_supergauss = FitObject(
-    name = "SuperGauss",
-    data = data,
-    func = SuperGauss_vec,
-    p0 = [1.0, mean(data.x), 1.0, 1.0, 0],
-)
-fit!(fit_supergauss);
-print_χ²(fit_supergauss)
-compute_χ²(fit_supergauss)
-coefficients(fit_supergauss);
-
-
-fit_supergauss_ext = FitObject(
-    name = "SuperGauss Ext",
-    data = data,
-    func = SuperGauss_vec,
-    p0 = [1.0, mean(data.x), 1.0, 1.0, 0, 0],
-)
-fit!(fit_supergauss_ext);
-print_χ²(fit_supergauss_ext)
-compute_χ²(fit_supergauss_ext)
-coefficients(fit_supergauss_ext);
-
-#%%
-
-f_fits = plot([fit_gauss, fit_supergauss, fit_supergauss_ext])
-f_residuals = plot_residuals([fit_gauss, fit_supergauss, fit_supergauss_ext])
-
-
-#%%
-
-fits, chi2s, coefs = make_fits(x, spectrum, uncertainty, sections);
-
-df_fit = DataFrame(permutedims(hcat(coefs...)), [:A, :μ, :σ, :P, :c, :b]);
-df_fit[!, "χ²"] = chi2s;
-df_fit
-
-#%%
-
-plot_fit_coefficients(df_fit)
-
-#%%
-
-plot_fourier(spectrum, "Spectrum", 100)
-
-#%%
-
-f_Δμ = Figure(resolution = (1200, 400));
-ax_Δμ = Axis(f_Δμ[1, 1], title = "Δμ", xlabel = "Fit Index", ylabel = "Δμ")
-lines!(ax_Δμ, diff(df_fit[!, :μ]))
-f_Δμ
-
-#%%
-
-display(plot_fourier(df_fit[!, "A"], "A", 5))
-display(plot_fourier(df_fit[!, "c"], "c", 5))
-
-for name in names(df_fit)
-    signal = df_fit[!, name]
-    display(plot_fourier(signal, name, 5))
+function get_df_fits(df)
+    orders = [1, nrow(df)]
+    return get_df_fits(df, orders)
 end
 
 
 
-# # # convert from wavelength to frequency - GHz  #
-# # frequency_lfc = (c / (wlfc * 1e-10)) * 1e-9
+df_fits = get_df_fits(df);
 
-# c = 299792458
-# function λ2ν_units(λ)
-#     (c / (λ * 1e-10)) * 1e-9
-# end
-
-# function λ2ν(λ)
-#     c / λ
-# end
-
-# function ν2λ(ν)
-#     c / ν
-# end
-
-
-# λ2ν(6340 * 1e-10)
-# ν2λ(νₙ(100)) * 1e10
+mask_good = df_fits.converged .&& df_fits.valid;
+df_fits_good = df_fits[mask_good, :];
 
 #%%
 
-# function νₙ(n)
-#     νᵣ = 14e9
-#     νₒ = 6.19e9
-#     return νᵣ * n + νₒ
-# end
+f_fit_coefficients_good = plot_fit_coefficients(df_fits_good)
 
-# νₙ(1)
+if savefig
+    save(
+        "figures/fit_coefficients_good__$(basename(filename)).pdf",
+        f_fit_coefficients_good,
+        pt_per_unit = 1,
+    )
+end
+#%%
+
+f_calibration = get_f_calibration(df_fits_good)
+f_calibration
+
+if savefig
+    save("figures/calibration__$(basename(filename)).pdf", f_calibration, pt_per_unit = 1)
+end
