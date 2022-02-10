@@ -1,4 +1,8 @@
 
+
+
+
+
 function plot_order(x, spectrum, λ_approx=missing; remove_nans = false)
 
     f = Figure(resolution = (1200, 400))
@@ -77,6 +81,31 @@ end
 #%%
 
 
+
+function get_images(filenames, savefig)
+
+    for filename in filenames
+        println(filename)
+
+        df = get_data(filename)
+
+        f_overlap = plot_overlap(df)
+        if savefig
+            save("figures/overlap__$(basename(filename)).pdf", f_overlap)
+        end
+
+        image = make_image(df)
+        f_image = plot_image(image)
+        if savefig
+            save("figures/image__$(basename(filename)).pdf", f_image, pt_per_unit = 1)
+            save("figures/image__$(basename(filename)).png", f_image, px_per_unit = 20)
+        end
+
+    end
+end
+
+
+#%%
 
 # let x = x[mask], spectrum = spectrum[mask], λ_approx = λ_approx[mask]
 #     pks, vals = findmaxima(spectrum, 2)

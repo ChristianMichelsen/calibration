@@ -581,3 +581,54 @@ end
 
 
 # #%%
+
+
+function get_df_fits(df, orders, spectrum_min = 0.2)
+
+    df_fits = DataFrame[]
+
+    for order = orders[1]:orders[end]
+
+        spectrum_all = df[order, :spectrum]
+        uncertainty_all = df[order, :uncertainty]
+        λ_approx_all = df[order, :wavelength]
+        x_all = range(1, length(spectrum_all))
+        # plot_order(x_all, spectrum_all, λ_approx_all)
+
+        nan_left, nan_right = get_not_nan_idx(spectrum_all)
+        mask = nan_left:nan_right
+
+        spectrum = spectrum_all[mask]
+        uncertainty = uncertainty_all[mask]
+        λ_approx = λ_approx_all[mask]
+        x = x_all[mask]
+        # plot_order(x, spectrum, λ_approx)
+
+        if !any(spectrum_min .< spectrum)
+            continue
+        end
+
+        #%%
+
+        # println(order)
+        sections = get_sections(spectrum, w = 7)
+        df_fit = make_fits(x, spectrum, uncertainty, λ_approx, sections)
+        # N_not_converged = sum(.!df_fit.converged)
+        # N_not_valid = sum(.!df_fit.valid)
+        # N_not_converged + N_not_valid
+        # sum(df_fit.converged .&& df_fit.valid)
+        # println(df_fit)
+
+        df_fit[!, :order] .= order
+
+        push!(df_fits, df_fit)
+    end
+
+    return vcat(df_fits...)
+end
+
+
+function get_df_fits(df)
+    orders = [1, nrow(df)]
+    return get_df_fits(df, orders)
+end
