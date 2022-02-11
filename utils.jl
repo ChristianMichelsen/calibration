@@ -60,14 +60,17 @@ function get_sections(spectrum; w = 7)
     peak_ids = findmaxima(spectrum, w)[1]
     half_width = floor.(Int, diff(peak_ids) / 2)
     center_edges = peak_ids[1:end-1] .+ half_width
+
     left_edge = peak_ids[1] - half_width[1]
     if left_edge < 1
         left_edge = 1
     end
+
     right_edge = peak_ids[end] + half_width[end]
     if right_edge > length(spectrum)
         right_edge = length(spectrum)
     end
+
     sections = [left_edge, center_edges..., right_edge]
     return sections
 end
@@ -121,11 +124,16 @@ function get_standard_deviations(fit::FitObject)
     return stderror(fit.fitresult)
 end
 
-function get_λ_true(fit::FitObject)
-    λ_approx_μ = get_λ_approx_μ_SI(fit.data.x, fit.data.λ_approx, fit)
-    return get_λ_true_from_λ_approx(λ_approx_μ)
+function get_λ_true_peak(fit::FitObject)
+    λ_approx_peak = get_λ_approx_peak_SI(fit)
+    return get_λ_true_peak_from_λ_approx(λ_approx_peak)
 end
 
+
+function get_ν_n(fit::FitObject)
+    λ_approx_peak = get_λ_approx_peak_SI(fit)
+    return find_n(λ_approx_peak)
+end
 
 
 function is_singular(J::Matrix{Float64})
@@ -171,7 +179,7 @@ function is_valid(fit::FitObject)
         return false
     end
 
-    if !(minimum(x) < μ < maximum(x))
+    if !(minimum(fit.data.x) < μ < maximum(fit.data.x))
         return false
     end
 
@@ -236,16 +244,16 @@ end
 #%%
 
 
-function get_λ_approx_μ(x, λ_approx, fit)
+function get_λ_approx_peak(fit::FitObject)
     μ_fit = coefficients(fit)[2]
-    idx = argmin(abs.(x .- μ_fit))
-    λ_tmp = λ_approx[idx]
+    idx = argmin(abs.(fit.data.x .- μ_fit))
+    λ_tmp = fit.data.λ_approx[idx]
     return λ_tmp
 end
 
 
-function get_λ_approx_μ_SI(x, λ_approx, fit)
-    return get_λ_approx_μ(x, λ_approx, fit) * 1e-10
+function get_λ_approx_peak_SI(fit::FitObject)
+    return get_λ_approx_peak(fit::FitObject) * 1e-10
 end
 
 
@@ -269,26 +277,40 @@ function νₙ(n)
     return ν
 end
 
-function n2λ(n)
-    ν = νₙ(n)
+function n2λ(ν_n)
+    ν = νₙ(ν_n)
     λ = ν2λ(ν)
     return λ
 end
 
 
-function get_λ_true_from_λ_approx(λ_approx)
-    n = find_n(λ_approx)
-    λ_true = n2λ(n)
-    return λ_true
+function get_λ_true_peak_from_λ_approx(λ_approx)
+    ν_n = find_n(λ_approx)
+    λ_true_peak = n2λ(ν_n)
+    return λ_true_peak
+end
+
+function get_ν_n_from_λ_approx(λ_approx)
+    ν_n = find_n(λ_approx)
+    return ν_n
+end
+
+function get_λ_true_peak_from_ν_n(ν_n)
+    λ_true_peak = n2λ(ν_n)
+    return λ_true_peak
 end
 
 
 
 function make_fits(x, spectrum, uncertainty, λ_approx, sections)
 
-    chi2s = Float64[]
     coefs = Vector[]
-    λ_true = Float64[]
+    ν_n = Int64[]
+    λ_true_peak = Float64[]
+    λ_approx_peak = Float64[]
+    x_min = Int64[]
+    x_max = Int64[]
+    chi2s = Float64[]
     converged = Bool[]
     valid = Bool[]
     standard_deviations = Vector[]
@@ -315,9 +337,13 @@ function make_fits(x, spectrum, uncertainty, λ_approx, sections)
 
         fit!(fit_supergauss_ext)
 
-        push!(chi2s, compute_χ²(fit_supergauss_ext))
         push!(coefs, coefficients(fit_supergauss_ext))
-        push!(λ_true, get_λ_true(fit_supergauss_ext))
+        push!(ν_n, get_ν_n(fit_supergauss_ext))
+        push!(λ_true_peak, get_λ_true_peak(fit_supergauss_ext))
+        push!(λ_approx_peak, get_λ_approx_peak_SI(fit_supergauss_ext))
+        push!(x_min, minimum(data.x))
+        push!(x_max, maximum(data.x))
+        push!(chi2s, compute_χ²(fit_supergauss_ext))
         push!(converged, is_converged(fit_supergauss_ext))
         push!(valid, is_valid(fit_supergauss_ext))
 
@@ -329,8 +355,12 @@ function make_fits(x, spectrum, uncertainty, λ_approx, sections)
     end
 
     df_fit = DataFrame(permutedims(hcat(coefs...)), [:A, :μ, :σ, :P, :c, :b])
+    df_fit[!, "ν_n"] = ν_n
+    df_fit[!, "λ_true_peak"] = λ_true_peak
+    df_fit[!, "λ_approx_peak"] = λ_approx_peak
+    df_fit[!, "x_min"] = x_min
+    df_fit[!, "x_max"] = x_max
     df_fit[!, "χ²"] = chi2s
-    df_fit[!, "λ_true"] = λ_true
     df_fit[!, "converged"] = converged
     df_fit[!, "valid"] = valid
 
@@ -440,7 +470,7 @@ if false
     print_χ²(fit_supergauss_ext)
     compute_χ²(fit_supergauss_ext)
     coefficients(fit_supergauss_ext)
-    get_λ_true(fit_supergauss_ext) * 1e10
+    get_λ_true_peak(fit_supergauss_ext) * 1e10
 
     #%%
 
@@ -582,6 +612,24 @@ end
 
 # #%%
 
+function get_data_for_order(df, order)
+
+    spectrum_all = df[order, :spectrum]
+    uncertainty_all = df[order, :uncertainty]
+    λ_approx_all = df[order, :wavelength]
+    x_all = range(1, length(spectrum_all))
+    # plot_order(x_all, spectrum_all, λ_approx_all)
+
+    nan_left, nan_right = get_not_nan_idx(spectrum_all)
+    mask = nan_left:nan_right
+
+    spectrum = spectrum_all[mask]
+    uncertainty = uncertainty_all[mask]
+    λ_approx = λ_approx_all[mask]
+    x = x_all[mask]
+
+    return spectrum, uncertainty, λ_approx, x
+end
 
 function get_df_fits(df, orders, spectrum_min = 0.2)
 
@@ -589,36 +637,15 @@ function get_df_fits(df, orders, spectrum_min = 0.2)
 
     for order = orders[1]:orders[end]
 
-        spectrum_all = df[order, :spectrum]
-        uncertainty_all = df[order, :uncertainty]
-        λ_approx_all = df[order, :wavelength]
-        x_all = range(1, length(spectrum_all))
-        # plot_order(x_all, spectrum_all, λ_approx_all)
-
-        nan_left, nan_right = get_not_nan_idx(spectrum_all)
-        mask = nan_left:nan_right
-
-        spectrum = spectrum_all[mask]
-        uncertainty = uncertainty_all[mask]
-        λ_approx = λ_approx_all[mask]
-        x = x_all[mask]
+        spectrum, uncertainty, λ_approx, x = get_data_for_order(df, order)
         # plot_order(x, spectrum, λ_approx)
 
         if !any(spectrum_min .< spectrum)
             continue
         end
 
-        #%%
-
-        # println(order)
         sections = get_sections(spectrum, w = 7)
         df_fit = make_fits(x, spectrum, uncertainty, λ_approx, sections)
-        # N_not_converged = sum(.!df_fit.converged)
-        # N_not_valid = sum(.!df_fit.valid)
-        # N_not_converged + N_not_valid
-        # sum(df_fit.converged .&& df_fit.valid)
-        # println(df_fit)
-
         df_fit[!, :order] .= order
 
         push!(df_fits, df_fit)
